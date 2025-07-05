@@ -76,6 +76,31 @@ graph.read_query <<-CYPHER, {user_id: current_user.id}, return: Team do |team|
 CYPHER
 ```
 
+### Defining custom node/relationship types
+
+You can represent nodes and relationships in your graph using your own Crystal types with certain properties automatically deserialized into other types for you. For example, let's say you have a `Post` type:
+
+```crystal
+struct Post
+  include FalkorDB::Serializable::Node
+
+  getter id : UUID
+  getter body : String
+  getter created_at : Time
+end
+```
+
+If your `id` is stored as a string (generated with the [`randomUUID()` function](https://docs.falkordb.com/cypher/functions.html#scalar-functions), for example) and your `created_at` property is stored as a Unix millisecond timestamp (via [`Time#to_unix_ms`](https://crystal-lang.org/api/1.16.3/Time.html#to_unix_ms:Int64-instance-method)), this post can be automatically deserialized:
+
+```crystal
+graph.read_query(<<-CYPHER, return: Post).each do |post|
+  MATCH (post:Post)
+  RETURN post
+CYPHER
+  # ...
+end
+```
+
 ## Contributing
 
 1. Fork it (<https://github.com/jgaskins/falkordb/fork>)
