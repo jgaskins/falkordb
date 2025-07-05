@@ -1,0 +1,13 @@
+name: falkordb
+version: 0.1.0
+
+authors:
+  - Jamie Gaskins <jgaskins@hey.com>
+
+dependencies:
+  redis:
+    github: jgaskins/redis
+
+crystal: '>= 1.16.3'
+
+license: MIT
