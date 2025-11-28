@@ -5,6 +5,8 @@ define_test redis
 
 describe FalkorDB do
   test "runs basic queries" do
+    # We need to write to the graph to ensure the graph's Redis key exists
+    graph.write_query "CREATE (n)"
     result = graph.read_query("RETURN 42 AS value")
 
     result.fields.should eq %w[value]
