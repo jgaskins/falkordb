@@ -10,9 +10,15 @@ module FalkorDB
                 Float64 |
                 Node |
                 Relationship |
+                Path |
                 Array(Value) |
                 Hash(String, Value) |
-                Point
+                Point |
+                VectorF32 |
+                LocalDateTime |
+                LocalDate |
+                LocalTime |
+                Duration
   alias List = Array(Value)
   alias Map = Hash(String, Value)
 end

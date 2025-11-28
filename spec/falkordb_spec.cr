@@ -11,6 +11,107 @@ describe FalkorDB do
     result.first.first.should eq 42
   end
 
+  test "can return any of the FalkorDB types" do
+    graph.write_query("return null").first.should eq [nil]
+    graph.write_query("return 'asdf'").first.should eq ["asdf"]
+    graph.write_query("return 123").first.should eq [123]
+    graph.write_query("return true, false").first.should eq [true, false]
+    graph.write_query("return 123.456").first.should eq [123.456]
+    graph.write_query("return [1, 'a', true]").first.should eq [[1, "a", true]]
+    graph.write_query("create (:A{id: 1})-[rel:REL{id: 2}]->(:B{id: 3}) RETURN rel").first.should eq([
+      FalkorDB::Relationship.new(
+        id: 0,
+        type: "REL",
+        src_node: 0,
+        dest_node: 1,
+        properties: FalkorDB::Map{
+          "id" => 2i64,
+        },
+      ),
+    ])
+    graph.write_query("create (n:MyNode{id: 123}) RETURN n").first.should eq([
+      FalkorDB::Node.new(
+        id: 2,
+        labels: %w[MyNode],
+        properties: FalkorDB::Map{
+          "id" => 123i64,
+        },
+      ),
+    ])
+    # Reusing the path we created above for the relationship check
+    graph.write_query("match p=()-[:REL]->() RETURN p").first.should eq([
+      FalkorDB::Path.new(
+        nodes: [
+          FalkorDB::Node.new(
+            id: 0,
+            labels: %w[A],
+            properties: FalkorDB::Map{
+              "id" => 1i64,
+            },
+          ),
+          FalkorDB::Node.new(
+            id: 1,
+            labels: %w[B],
+            properties: FalkorDB::Map{
+              "id" => 3i64,
+            },
+          ),
+        ],
+        relationships: [
+          FalkorDB::Relationship.new(
+            id: 0,
+            type: "REL",
+            src_node: 0,
+            dest_node: 1,
+            properties: FalkorDB::Map{
+              "id" => 2i64,
+            },
+          ),
+        ],
+      ),
+    ])
+    graph.write_query("return {id: 123}").first.should eq([FalkorDB::Map{"id" => 123i64}])
+    graph.write_query("return point({latitude: 1, longitude: 2})").first.should eq([
+      FalkorDB::Point.new(
+        latitude: 1,
+        longitude: 2,
+      ),
+    ])
+    graph.write_query("return vecf32([1.2, 3.4])").first.should eq [FalkorDB::VectorF32.new([1.2, 3.4] of Float32)]
+    graph.write_query("return localdatetime({year: 2025, month: 11, day: 28, hour: 2, minute: 4, second: 25, nanosecond: 123456789})").first.should eq [FalkorDB::LocalDateTime.new(
+      year: 2025,
+      month: 11,
+      day: 28,
+      hour: 2,
+      minute: 4,
+      second: 25,
+    )]
+    graph.write_query("return date({year: 2025, month: 11, day: 28})").first.should eq [
+      FalkorDB::LocalDate.new(
+        year: 2025,
+        month: 11,
+        day: 28,
+      ),
+    ]
+    graph.write_query("return localtime({hour: 2, minute: 21, second: 9})").first.should eq [
+      FalkorDB::LocalTime.new(
+        hour: 2,
+        minute: 21,
+        second: 9,
+      ),
+    ]
+    graph.write_query("return duration({years: 2, months: 6, days: 13, hours: 2, minutes: 21, seconds: 9})").first.should eq [
+      FalkorDB::Duration.new(
+        years: 2,
+        months: 6,
+        days: 13,
+        hours: 2,
+        minutes: 21,
+        seconds: 9,
+      ),
+    ]
+  end
+
   test "sets the return type" do
     result = graph.write_query <<-CYPHER, return: UUID
       CREATE (user:User {

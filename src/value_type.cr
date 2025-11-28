@@ -1,22 +1,30 @@
 require "./value"
 require "./node"
 require "./relationship"
+require "./path"
+require "./vector_f32"
+require "./temporal"
 require "redis/to_hash"
 
 module FalkorDB
   enum ValueType
-    UNKNOWN =  0
-    NULL    =  1
-    STRING  =  2
-    INTEGER =  3
-    BOOLEAN =  4
-    DOUBLE  =  5
-    ARRAY   =  6
-    EDGE    =  7
-    NODE    =  8
-    PATH    =  9
-    MAP     = 10
-    POINT   = 11
+    UNKNOWN    =  0
+    NULL       =  1
+    STRING     =  2
+    INTEGER    =  3
+    BOOLEAN    =  4
+    DOUBLE     =  5
+    ARRAY      =  6
+    EDGE       =  7
+    NODE       =  8
+    PATH       =  9
+    MAP        = 10
+    POINT      = 11
+    VECTOR_F32 = 12
+    DATETIME   = 13
+    DATE       = 14
+    TIME       = 15
+    DURATION   = 16
 
     def self.value_for(type, value, cache) : Value
       type = ValueType.new(type.as(Int64).to_i)
@@ -28,7 +36,7 @@ module FalkorDB
       in .null?
         nil
       in .boolean?
-        value == 1
+        value == 1 || value == "true"
       in .double?
         value.as(String).to_f
       in .edge?
@@ -42,7 +50,7 @@ module FalkorDB
           value_for(t, v, cache)
         end
       in .path?
-        raise ArgumentError.new("Paths not supported yet")
+        Path.from_falkordb_value type, value, cache
       in .map?
         # Map.from_falkordb_value(type, value, cache)
         hash = Map.new(initial_capacity: value.as(Array).size // 2)
@@ -56,6 +64,16 @@ module FalkorDB
       in .point?
         latitude, longitude = value.as(Array)
         Point.new(latitude.as(String).to_f, longitude.as(String).to_f)
+      in .vector_f32?
+        VectorF32.from_falkordb_value type, value, cache
+      in .datetime?
+        LocalDateTime.from_falkordb_value type, value, cache
+      in .date?
+        LocalDate.from_falkordb_value type, value, cache
+      in .time?
+        LocalTime.from_falkordb_value type, value, cache
+      in .duration?
+        Duration.from_falkordb_value type, value, cache
       in .unknown?
         raise ArgumentError.new("Unknown value type #{type}. Value: #{value.inspect}")
       end.as(Value)
