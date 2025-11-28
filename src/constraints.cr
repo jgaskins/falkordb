@@ -50,6 +50,14 @@ record FalkorDB::Constraints, graph : Graph, redis : Redis::Commands, key : Stri
     command << "PROPERTIES" << properties.size.to_s
     command.concat properties
     result = redis.run(command)
+  rescue ex : Redis::Error
+    entity_descriptor = case entity_type
+                        in .node?
+                          "label"
+                        in .relationship?
+                          "type"
+                        end
+    raise Error.new("#{ex.message}, attempting to #{operation.to_s.downcase} #{constraint_type.to_s.downcase} constraint on #{entity_type.to_s.downcase} #{entity_descriptor} #{entity_name.inspect} for properties #{properties.inspect}", cause: ex)
   end
 
   private def list_results(results)
