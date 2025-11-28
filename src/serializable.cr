@@ -1,3 +1,7 @@
+require "json"
+require "uuid/json"
+require "uri/json"
+
 require "./error"
 
 module FalkorDB
@@ -70,7 +74,11 @@ module FalkorDB
         end
         metadata = Metadata.new(id: id, labels: labels)
 
-        T.new(metadata, properties.as(Array), cache)
+        T.new(
+          falkordb_metadata: metadata,
+          properties: properties.as(Array),
+          cache: cache,
+        )
       end
 
       macro included
@@ -105,7 +113,12 @@ module FalkorDB
         end
       end
 
-      def initialize(metadata : ::FalkorDB::Serializable::Node::Metadata, properties : Array, cache)
+      def initialize(
+        *,
+        falkordb_metadata metadata : ::FalkorDB::Serializable::Node::Metadata,
+        properties : Array,
+        cache,
+      )
         {% begin %}
           {% for ivar in @type.instance_vars %}
             %found{ivar.name} = false
@@ -117,16 +130,19 @@ module FalkorDB
             key = cache.property(property_id.as(Int64))
             case key
               {% for ivar in @type.instance_vars %}
-                when "{{ivar.name}}"
-                  %found{ivar.name} = true
-                  %value{ivar.name} = 
-                  {% if (ann = ivar.annotation(::FalkorDB::Field)) && ann[:converter] %}
-                    {{ann[:converter]}}.from_falkordb_value(
-                     {{ivar.type}}.from_falkordb_value(::FalkorDB::ValueType.new(type.as(Int).to_i), value, cache)
-                    )
-                  {% else %}
-                    {{ivar.type}}.from_falkordb_value(::FalkorDB::ValueType.new(type.as(Int).to_i), value, cache)
-                  {% end %}
+                {% ann = ivar.annotation(::FalkorDB::Field) %}
+                {% if ann.nil? || !ann[:ignore] %}
+                  when "{{ivar.name}}"
+                    %found{ivar.name} = true
+                    %value{ivar.name} = 
+                    {% if (ann = ivar.annotation(::FalkorDB::Field)) && ann[:converter] %}
+                      {{ann[:converter]}}.from_falkordb_value(
+                       {{ivar.type}}.from_falkordb_value(::FalkorDB::ValueType.new(type.as(Int).to_i), value, cache)
+                      )
+                    {% else %}
+                      {{ivar.type}}.from_falkordb_value(::FalkorDB::ValueType.new(type.as(Int).to_i), value, cache)
+                    {% end %}
+                {% end %}
               {% end %}
             else
               unknown_falkordb_node_property key, value
@@ -134,13 +150,16 @@ module FalkorDB
           end
 
           {% for ivar in @type.instance_vars %}
-            if %found{ivar.name}
-              @{{ivar}} = %value{ivar.name}
-            {% unless ivar.type.nilable? %}
-            else
-              raise PropertyMissing.new("Node did not contain the property `{{ivar.name}}`")
+            {% ann = ivar.annotation(::FalkorDB::Field) %}
+            {% if ann.nil? || !ann[:ignore] %}
+              if %found{ivar.name}
+                @{{ivar}} = %value{ivar.name}
+              {% unless ivar.type.nilable? %}
+              else
+                raise PropertyMissing.new("Node did not contain the property `{{ivar.name}}`")
+              {% end %}
+              end
             {% end %}
-            end
           {% end %}
         {% end %}
       end
@@ -197,7 +216,7 @@ module FalkorDB
                 when "{{ivar.name}}"
                   %found{ivar.name} = true
                   %value{ivar.name} = 
-                  {% if ann = ivar.annotation(::FalkorDB::Field) && ann[:converter] %}
+                  {% if (ann = ivar.annotation(::FalkorDB::Field)) && ann[:converter] %}
                     {{ann[:converter]}}.from_falkordb_value(
                      {{ivar.type}}.from_falkordb_value(::FalkorDB::ValueType.new(type.as(Int).to_i), value, cache)
                     )
