@@ -9,6 +9,14 @@ record FalkorDB::Constraints, graph : Graph, redis : Redis::Commands, key : Stri
     operation :drop, constraint_type, :node, node_label, properties
   end
 
+  def create(constraint_type : Type, *, relationship_type : String, properties : Array(String))
+    operation :create, constraint_type, :relationship, relationship_type, properties
+  end
+
+  def drop(constraint_type : Type, *, relationship_type : String, properties : Array(String))
+    operation :drop, constraint_type, :relationship, relationship_type, properties
+  end
+
   def list
     list_results graph.write_query(<<-CYPHER, return: {String, String, Array(String), String, String})
       CALL db.constraints() YIELD type, label, properties, entitytype, status
