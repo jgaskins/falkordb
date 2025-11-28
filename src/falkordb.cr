@@ -562,7 +562,17 @@ end
 
 {% for size in %w[32 64] %}
 def Float{{size.id}}.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
-  String.from_falkordb_value(type, value, cache).to_f{{size.id}}
+  case type
+  when .string?
+    String.from_falkordb_value(type, value, cache).to_f{{size.id}}
+  when .integer?
+    Int64.from_falkordb_value(type, value, cache).to_f{{size.id}}
+  when .double?
+    # Float{{size.id}}.from_falkordb_value(type, value, cache)
+    value.as(String).to_f{{size.id}}
+  else
+    raise FalkorDB::Error.new("Could not parse #{value.inspect} (#{type}) as Float{{size.id}}")
+  end
 end
 {% end %}
 
