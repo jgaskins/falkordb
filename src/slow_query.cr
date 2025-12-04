@@ -3,7 +3,7 @@ module FalkorDB
     def self.new(array : Array)
       timestamp_string, command, query, duration_string = array
       new(
-        timestamp: Time.unix_ms(timestamp_string.as(String).to_i64),
+        timestamp: Time.unix(timestamp_string.as(String).to_i64),
         command: command.as(String),
         query: query.as(String),
         duration: duration_string.as(String).to_f.milliseconds,
