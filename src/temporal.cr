@@ -25,7 +25,7 @@ module FalkorDB
     end
 
     def to_time : Time
-      time
+      @time
     end
   end
 
