@@ -44,7 +44,6 @@ module FalkorDB
       in .node?
         Node.from value.as(Array), cache
       in .array?
-        # (Node.from?(value.as(Array)) || Relationship.from?(value.as(Array)) || value.as(Array))
         value.as(Array).map do |item|
           t, v = item.as(Array)
           value_for(t, v, cache)
@@ -52,7 +51,6 @@ module FalkorDB
       in .path?
         Path.from_falkordb_value type, value, cache
       in .map?
-        # Map.from_falkordb_value(type, value, cache)
         hash = Map.new(initial_capacity: value.as(Array).size // 2)
         value.as(Array).each_slice(2, reuse: true) do |(key, value)|
           t, v = value.as(Array)

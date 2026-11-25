@@ -73,7 +73,7 @@ record FalkorDB::Constraints, graph : Graph, redis : Redis::Commands, key : Stri
         label: label,
         properties: properties,
         entity_type: EntityType.parse(entity_type),
-        status: Status.parse(status),
+        status: Status.parse(status.tr(" ", "_")),
       )
     end
   end

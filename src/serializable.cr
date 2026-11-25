@@ -3,6 +3,8 @@ require "uuid/json"
 require "uri/json"
 
 require "./error"
+require "./point"
+require "./temporal"
 
 module FalkorDB
   annotation Field
@@ -74,14 +76,18 @@ module FalkorDB
         end
         metadata = Metadata.new(id: id, labels: labels)
 
-        T.new(
-          falkordb_metadata: metadata,
-          properties: properties.as(Array),
-          cache: cache,
-        )
+        T.new_from_falkordb_node(metadata, properties.as(Array), cache)
       end
 
       macro included
+        # :nodoc:
+        def self.new_from_falkordb_node(metadata : ::FalkorDB::Serializable::Node::Metadata, properties : Array, cache)
+          instance = allocate
+          instance.initialize(falkordb_metadata: metadata, properties: properties, cache: cache)
+          GC.add_finalizer(instance) if instance.responds_to?(:finalize)
+          instance
+        end
+
         def self.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
           ::FalkorDB::Serializable::Node.from_falkordb_value(self, type, value, cache)
         end
@@ -154,7 +160,7 @@ module FalkorDB
             {% if ann.nil? || !ann[:ignore] %}
               if %found{ivar.name}
                 @{{ivar}} = %value{ivar.name}
-              {% unless ivar.type.nilable? %}
+              {% unless ivar.type.nilable? || ivar.has_default_value? %}
               else
                 raise PropertyMissing.new("Node did not contain the property `{{ivar.name}}`")
               {% end %}
@@ -188,10 +194,18 @@ module FalkorDB
           destination_node: destination_node.as(Int64),
         )
 
-        T.new(metadata, properties.as(Array), cache)
+        T.new_from_falkordb_relationship(metadata, properties.as(Array), cache)
       end
 
       macro included
+        # :nodoc:
+        def self.new_from_falkordb_relationship(metadata : ::FalkorDB::Serializable::Relationship::Metadata, properties : Array, cache)
+          instance = allocate
+          instance.initialize(metadata, properties, cache)
+          GC.add_finalizer(instance) if instance.responds_to?(:finalize)
+          instance
+        end
+
         def self.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
           ::FalkorDB::Serializable::Relationship.from_falkordb_value(self, type, value, cache)
         end
@@ -232,7 +246,7 @@ module FalkorDB
           {% for ivar in @type.instance_vars %}
             if %found{ivar.name}
               @{{ivar}} = %value{ivar.name}
-            {% unless ivar.type.nilable? %}
+            {% unless ivar.type.nilable? || ivar.has_default_value? %}
             else
               raise PropertyMissing.new("Relationship did not contain the property `{{ivar.name}}`")
             {% end %}
@@ -272,271 +286,4 @@ module FalkorDB
       end
     end
   end
-end
-
-# :nodoc:
-struct Tuple
-  def self.from_graph_result(result : Array)
-    {% begin %}
-      {
-        {% for type, index in @type.type_vars %}
-          {{type.instance}}.from_graph_result(result[{{index}}].as(::FalkorDB::Value)),
-        {% end %}
-      }
-    {% end %}
-  end
-
-  def from_graph_result(result : Array)
-    {% begin %}
-      {
-        {% for type, index in @type.type_vars %}
-          {{type.instance}}.from_graph_result(result[{{index}}]).as(::FalkorDB::Value),
-        {% end %}
-      }
-    {% end %}
-  end
-
-  def self.can_transform_graph_result?(result : Array)
-    true
-  end
-end
-
-# :nodoc:
-struct Enum
-  def self.from_graph_result(result : Int64)
-    from_value result
-  end
-
-  def self.from_graph_result(result : String)
-    parse result
-  end
-
-  def self.from_graph_result(result : FalkorDB::Value)
-    raise ArgumentError.new("Cannot create a #{self} from #{result.inspect} (#{result.class})")
-  end
-end
-
-# :nodoc:
-struct Time
-  def self.from_graph_result(result : Redis::Value)
-    raise ArgumentError.new("Cannot create a {{@type.id}} from #{result.inspect}")
-  end
-
-  def self.can_transform_graph_result?(result : Redis::Value)
-    false
-  end
-
-  def self.can_transform_graph_result?(result : Int64 | String)
-    true
-  end
-
-  def self.from_graph_result(result : String)
-    Time::Format::RFC_3339.parse result
-  end
-
-  def self.from_graph_result(result : Int64)
-    Time.unix_ms(result)
-  end
-
-  def to_falkordb_param(io : IO)
-    to_unix_ms.to_falkordb_param io
-  end
-end
-
-# :nodoc:
-struct UUID
-  def self.from_graph_result(result : Redis::Value)
-    raise ArgumentError.new("Cannot create a #{self} from #{result.inspect}")
-  end
-
-  def self.can_transform_graph_result?(result : FalkorDB::Value)
-    false
-  end
-
-  def self.can_transform_graph_result?(result : String)
-    true
-  end
-
-  def self.from_graph_result(result : String)
-    new result
-  end
-
-  def to_falkordb_param(io : IO)
-    io << '"'
-    to_s io
-    io << '"'
-  end
-end
-
-# :nodoc:
-class String
-  def self.from_graph_result(result : FalkorDB::Value)
-    raise ArgumentError.new("Cannot create a #{self} from #{result.inspect}")
-  end
-
-  def self.can_transform_graph_result?(result : FalkorDB::Value | Redis::Value)
-    false
-  end
-
-  def self.can_transform_graph_result?(result : String)
-    true
-  end
-
-  def self.from_graph_result(result : String)
-    result
-  end
-
-  def to_falkordb_param(io : IO)
-    inspect io
-  end
-end
-
-# :nodoc:
-struct Nil
-  def self.from_graph_result(result : FalkorDB::Value)
-    raise ArgumentError.new("Cannot create a #{self} from #{result.inspect}")
-  end
-
-  def self.can_transform_graph_result?(result : FalkorDB::Value | Redis::Value)
-    false
-  end
-
-  def self.can_transform_graph_result?(result : Nil)
-    true
-  end
-
-  def self.from_graph_result(result : Nil)
-    nil
-  end
-
-  def to_falkordb_param(io : IO)
-    io << "null"
-  end
-end
-
-# :nodoc:
-struct Int
-  def self.from_graph_result(result : FalkorDB::Value)
-    raise ArgumentError.new("Cannot create a #{self} from #{result.inspect}")
-  end
-
-  def self.can_transform_graph_result?(result : FalkorDB::Value)
-    false
-  end
-
-  def self.can_transform_graph_result?(result : Int)
-    true
-  end
-
-  def to_falkordb_param(io : IO)
-    io << self
-  end
-end
-
-{% for bits in %w[8 16 32 64] %}
-  # :nodoc:
-  struct Int{{bits.id}}
-    def self.from_graph_result(result : Int64)
-      result.to_i{{bits.id}}
-    end
-  end
-{% end %}
-
-# :nodoc:
-struct Float64
-  def self.from_graph_result(result : FalkorDB::Value)
-    raise ArgumentError.new("Cannot create a #{self} from #{result.inspect}")
-  end
-
-  def self.from_graph_result(result : String)
-    result.to_f64
-  end
-
-  def self.can_transform_graph_result?(result : FalkorDB::Value)
-    false
-  end
-
-  def self.can_transform_graph_result?(result : String)
-    true
-  end
-
-  def to_falkordb_param(io : IO)
-    to_s io
-  end
-end
-
-# :nodoc:
-struct Bool
-  def self.from_graph_result(result : FalkorDB::Value)
-    raise ArgumentError.new("Cannot create a #{self} from #{result.inspect}")
-  end
-
-  def self.from_graph_result(result : Nil)
-    false
-  end
-
-  # Booleans in Redis tend to be represented by integers where 0 indicates false
-  def self.from_graph_result(value : Int64)
-    value != 0
-  end
-end
-
-# :nodoc:
-class Array
-  def self.from_graph_result(result : FalkorDB::Value)
-    raise ArgumentError.new("Cannot create a #{self} from #{result.inspect}")
-  end
-
-  def self.from_graph_result(result : Array)
-    result.map do |item|
-      T.from_graph_result(item)
-    end
-  end
-
-  def self.can_transform_graph_result?(result : FalkorDB::Value)
-    false
-  end
-
-  def self.can_transform_graph_result?(result : Array)
-    true
-  end
-
-  def to_falkordb_param(io : IO)
-    io << %("[)
-    join io, ", "
-    io << %(]")
-  end
-end
-
-# :nodoc:
-struct Tuple
-  def self.from_graph_result(array : Array)
-    {% begin %}
-      {
-        {% for type, index in T %}
-          {{type}}.from_graph_result(array[{{index}}]),
-        {% end %},
-      }
-    {% end %}
-  end
-
-  def self.can_transform_graph_result?(array : Array)
-    return false unless array.size == size
-    {% for type, index in T %}
-      return false unless {{type}}.can_transform_graph_result?(array[{{index}}])
-    {% end %}
-
-    true
-  end
-end
-
-# :nodoc:
-def Union.from_graph_result(result : FalkorDB::Value)
-  {% for type in T %}
-    if {{type}}.can_transform_graph_result?(result)
-      return {{type}}.from_graph_result(result)
-    end
-  {% end %}
-
-  raise ArgumentError.new("Cannot create a #{self} from #{result.inspect} (#{result.class})")
 end

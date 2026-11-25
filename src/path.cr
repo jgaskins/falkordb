@@ -24,4 +24,8 @@ struct FalkorDB::Path
 
   def initialize(@nodes, @relationships)
   end
+
+  def to_falkordb_param(io : IO)
+    raise Error.new("Cannot serialize a FalkorDB::Path as a param")
+  end
 end

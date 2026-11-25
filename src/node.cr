@@ -48,5 +48,9 @@ module FalkorDB
     # :nodoc:
     def initialize(@id, @labels, @properties)
     end
+
+    def to_falkordb_param(io : IO)
+      raise Error.new("Cannot serialize a FalkorDB::Node as a param")
+    end
   end
 end

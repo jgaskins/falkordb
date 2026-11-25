@@ -27,6 +27,22 @@ module FalkorDB
     def to_time : Time
       @time
     end
+
+    def to_falkordb_param(io : IO)
+      io << "'"
+      @time.year.to_s io, precision: 4
+      io << '-'
+      @time.month.to_s io, precision: 2
+      io << '-'
+      @time.day.to_s io, precision: 2
+      io << 'T'
+      @time.hour.to_s io, precision: 2
+      io << ':'
+      @time.minute.to_s io, precision: 2
+      io << ':'
+      @time.second.to_s io, precision: 2
+      io << "'"
+    end
   end
 
   struct LocalDate
@@ -50,6 +66,16 @@ module FalkorDB
 
     def initialize(@year, @month, @day)
     end
+
+    def to_falkordb_param(io : IO)
+      io << "'"
+      year.to_s io, precision: 4
+      io << '-'
+      month.to_s io, precision: 2
+      io << '-'
+      day.to_s io, precision: 2
+      io << "'"
+    end
   end
 
   struct LocalTime
@@ -72,6 +98,16 @@ module FalkorDB
     end
 
     def initialize(@hour, @minute, @second)
+    end
+
+    def to_falkordb_param(io : IO)
+      io << "'"
+      @hour.to_s io, precision: 2
+      io << ':'
+      @minute.to_s io, precision: 2
+      io << ':'
+      @second.to_s io, precision: 2
+      io << "'"
     end
   end
 
@@ -97,6 +133,24 @@ module FalkorDB
 
     def to_span
       @span
+    end
+
+    # Serializes the duration as an ISO-8601 duration in seconds, such as
+    # `'PT45296S'` or `'PT-1.5S'`. FalkorDB only accepts a negative sign on the
+    # individual components, not before the `P`.
+    #
+    # NOTE: FalkorDB stores durations as whole seconds and truncates any
+    # fractional part, so sub-second precision does not survive a round trip.
+    def to_falkordb_param(io : IO)
+      span = @span.abs
+
+      io << "'PT"
+      io << '-' if @span.negative?
+      io << span.to_i
+      if (nanoseconds = span.nanoseconds) > 0
+        io << '.' << nanoseconds.to_s.rjust(9, '0').rstrip('0')
+      end
+      io << "S'"
     end
   end
 end

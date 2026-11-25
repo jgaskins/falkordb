@@ -83,5 +83,9 @@ module FalkorDB
 
     def initialize(@id, @type, @src_node, @dest_node, @properties)
     end
+
+    def to_falkordb_param(io : IO)
+      raise Error.new("Cannot serialize a FalkorDB::Relationship as a param")
+    end
   end
 end

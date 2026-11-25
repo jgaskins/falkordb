@@ -30,6 +30,33 @@ module FalkorDB
       end
     end
 
+    # Create a full-text index on the given properties of nodes with the given
+    # label.
+    #
+    # ```
+    # graph.indices.create_fulltext_node "User", "name", "bio"
+    # ```
+    def create_fulltext_node(label : String, *properties : String)
+      cypher = String.build do |str|
+        str << "CREATE FULLTEXT INDEX FOR (n:" << label << ") ON ("
+        properties.join str, ", " do |property, io|
+          io << "n." << property
+        end
+        str << ')'
+      end
+      graph.write_query cypher
+    end
+
+    # Create a full-text index with per-field options (`weight`, `nostem`,
+    # `phonetic`) using the `db.idx.fulltext.createNodeIndex` procedure.
+    #
+    # NOTE: FalkorDB 6.0 does not support this procedure form with arguments
+    # and its DDL syntax has no per-field options, so this overload only works
+    # on FalkorDB 4.x.
+    #
+    # ```
+    # graph.indices.create_fulltext_node "User", "id", {field: "name", nostem: true, weight: 2}
+    # ```
     def create_fulltext_node(label, *properties)
       cypher = String.build do |str|
         str << "CALL db.idx.fulltext.createNodeIndex("
@@ -100,25 +127,6 @@ module FalkorDB
     entity_type : EntityType,
     status : Status,
     info : Map do
-    # def self.from_falkordb_value(type : FalkorDB::ValueType, value, cache) : self
-    #   return_types = {
-    #     String,                           # label
-    #     Array(String),                    # properties
-    #     Hash(String, Array(Index::Type)), # types
-    #     Hash(String, Map),                # options
-    #     String,                           # language
-    #     Array(String),                    # stopwords
-    #     Index::EntityType,                # entitytype
-    #     Index::Status,                    # status
-    #     Map,                              # info
-    #   }
-    #   row = return_types.map_with_index do |return_type, index|
-    #     t, v = value.as(Array)[index].as(Array)
-    #     return_type.from_falkordb_value t, v, cache
-    #   end
-    #   new(*row)
-    # end
-
     enum Type
       RANGE
       FULLTEXT
@@ -130,7 +138,17 @@ module FalkorDB
     end
 
     enum Status
+      # The index is still being populated after being created
+      UNDER_CONSTRUCTION
       OPERATIONAL
+
+      # :nodoc:
+      def self.from_falkordb_value(type : FalkorDB::ValueType, value, cache) : self
+        status = String.from_falkordb_value(type, value, cache)
+        # While FalkorDB is populating an index, the status includes its
+        # progress, such as "[Indexing] 0/500000: UNDER CONSTRUCTION".
+        parse status.rpartition(": ").last.tr(" ", "_")
+      end
     end
   end
 end

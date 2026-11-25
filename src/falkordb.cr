@@ -1,6 +1,4 @@
 require "redis"
-require "json"
-require "uuid/json"
 
 require "./error"
 require "./value"
@@ -13,6 +11,7 @@ require "./node"
 require "./relationship"
 require "./point"
 require "./slow_query"
+require "./params"
 
 # [FalkorDB](https://falkordb.com) is a graph database built
 # on top of Redis that you query using the [Cypher](https://opencypher.org)
@@ -244,24 +243,38 @@ module FalkorDB
       end
     end
 
+    def pipeline(&)
+      @redis.as(Redis::Client).pipeline do |pipe|
+        yield Graph.new(pipe, @key)
+      end
+    end
+
     def run_write(cypher : String)
-      execute_write cypher
+      execute_write(cypher).as(Array)
     end
 
     def run_write(cypher : String, params)
-      execute_write build_query(cypher, params)
+      execute_write(cypher, params).as(Array)
     end
 
     def run_read(cypher : String)
-      execute_write cypher
+      execute_read(cypher).as(Array)
     end
 
     def run_read(cypher : String, params)
-      execute_write build_query(cypher, params)
+      execute_read(cypher, params).as(Array)
+    end
+
+    def execute_write(query : String, params)
+      execute_write build_query(query, params)
     end
 
     def execute_write(query : String)
       execute "GRAPH.QUERY", query
+    end
+
+    def execute_read(query : String, params)
+      execute_read build_query(query, params)
     end
 
     def execute_read(query : String)
@@ -269,7 +282,7 @@ module FalkorDB
     end
 
     def execute(command : String, query : String)
-      @redis.run({command, @key, query, "--compact"}).as(Array)
+      @redis.run({command, @key, query, "--compact"})
     rescue ex : Redis::Error
       if (message = ex.message) && (match = message.match(/unique constraint violation on (node|edge) of type (\w+)/))
         raise ConstraintViolation.new("property set on #{match[1]} with type #{match[2]} violates a constraint", cause: ex)
@@ -297,56 +310,75 @@ module FalkorDB
       end
     end
 
+    def udf
+      UserDefinedFunctions.new(@redis)
+    end
+
     protected def build_query(cypher, params)
       String.build do |str|
-        str << "CYPHER "
-        params.each do |key, value|
-          key.to_s str
-          str << '='
-          encode_param value, str
+        unless params.empty?
+          str << "CYPHER "
+          params.each do |key, value|
+            key.to_s str
+            str << '='
+            encode_param value, str
+            str << ' '
+          end
           str << ' '
         end
-        str << ' ' << cypher.strip
+        str << cypher.strip
       end
     end
 
-    private def encode_param(array : Array, io : IO) : Nil
-      io << '['
-      array.each_with_index 1 do |value, index|
-        encode_param value, io
-        io << ',' if index < array.size
-      end
-      io << ']'
+    private def encode_param(node : Node, io : IO) : Nil
+      raise Error.new "Cannot pass a node as an argument"
     end
 
-    private def encode_param(hash : Hash, io : IO) : Nil
-      io << '{'
-      hash.each_with_index 1 do |(key, value), index|
-        key.to_s io
-        io << ':'
-        encode_param value, io
-        io << ',' if index < hash.size
-      end
-      io << '}'
-    end
-
-    private def encode_param(kv : NamedTuple, io : IO) : Nil
-      io << '{'
-      kv.each_with_index 1 do |key, value, index|
-        key.to_s io
-        io << ':'
-        encode_param value, io
-        io << ',' if index < kv.size
-      end
-      io << '}'
-    end
-
-    private def encode_param(point : FalkorDB::Point, io : IO) : Nil
-      io << "{latitude: " << point.latitude << ",longitude: " << point.longitude << "}"
+    private def encode_param(value : FalkorDB::Params, io : IO) : Nil
+      value.to_params io
     end
 
     private def encode_param(value, io : IO) : Nil
-      value.to_json io
+      value.to_falkordb_param io
+    end
+  end
+
+  # Checks that `result`, a compact-format `[type_id, value]` pair, holds a
+  # value of type `data_type` and returns the raw value.
+  def self.check_value!(result : Array, data_type : ValueType)
+    type, value = result
+    type = FalkorDB::ValueType.new(type.as(Int).to_i)
+    unless type == data_type
+      raise ArgumentError.new("Expected #{data_type}, got #{type} (#{value.inspect})")
+    end
+
+    value
+  end
+
+  struct UserDefinedFunctions(RedisClient)
+    @redis : RedisClient
+
+    def initialize(@redis)
+    end
+
+    def load(library : String, script : String, replace : Bool = false)
+      command = {"graph.udf", "load"}
+      command += {"replace"} if replace
+      command += {library, script}
+      @redis.run(command)
+    end
+
+    def list(library : String? = nil)
+      command = {"graph.udf", "list"}
+      if library
+        command += {library}
+      end
+
+      @redis.run command
+    end
+
+    def delete(library : String)
+      @redis.run({"graph.udf", "delete", library})
     end
   end
 
@@ -387,23 +419,10 @@ module FalkorDB
 
         parsed_rows = rows.as(Array).map do |row|
           row = row.as(Array)
-          {% if T == Array(Value) %}
-            row.map do |item|
-              type, value = item.as(Array)
-
-              ValueType.value_for(type, value, cache).as(Value)
-            end
-          {% elsif T < Tuple %}
-              {
-                {% for type, index in T %}
-                  begin
-                    type, value = row[{{index}}].as(Array)
-                    type = ValueType.new(type.as(Int).to_i)
-                    {{type}}.from_falkordb_value(type, value, cache)
-                  end,
-                {% end %}
-              }
-            {% else %}
+          {% if T < Tuple || T == List %}
+            # Each element of the row is one column in the RETURN clause
+            T.from_falkordb_value(:array, row, cache).as(T)
+          {% else %}
             type, value = row[0].as(Array)
             type = ValueType.new(type.as(Int).to_i)
             T.from_falkordb_value(type, value, cache).as(T)
@@ -452,8 +471,6 @@ module FalkorDB
           cached = item.ends_with? "1"
         when /Query internal execution time: (\d+\.\d+) milliseconds/
           query_time = $1.to_f64.milliseconds
-          # else
-          #   puts "UNHANDLED METADATA: #{item}"
         end
       end
 
@@ -560,21 +577,58 @@ def {{type.id}}.from_falkordb_value(type : FalkorDB::ValueType, value, cache) : 
 end
 {% end %}
 
-{% for size in %w[32 64] %}
-def Float{{size.id}}.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
-  case type
-  when .string?
-    String.from_falkordb_value(type, value, cache).to_f{{size.id}}
-  when .integer?
-    Int64.from_falkordb_value(type, value, cache).to_f{{size.id}}
-  when .double?
-    # Float{{size.id}}.from_falkordb_value(type, value, cache)
-    value.as(String).to_f{{size.id}}
-  else
-    raise FalkorDB::Error.new("Could not parse #{value.inspect} (#{type}) as Float{{size.id}}")
+class String
+  # Serializes the string as a double-quoted Cypher string literal, using only
+  # the escape sequences Cypher supports. Crystal's `String#inspect` escapes
+  # things Cypher doesn't, like `#{` and `\e`.
+  def to_falkordb_param(io : IO)
+    io << '"'
+    each_char do |char|
+      case char
+      when '"'  then io << %(\\")
+      when '\\' then io << %(\\\\)
+      when '\n' then io << %(\\n)
+      when '\t' then io << %(\\t)
+      when '\r' then io << %(\\r)
+      when '\b' then io << %(\\b)
+      when '\f' then io << %(\\f)
+      when .ascii_control?
+        io << %(\\u)
+        char.ord.to_s io, base: 16, precision: 4, upcase: true
+      else
+        io << char
+      end
+    end
+    io << '"'
   end
 end
+
+{% for size in %w[32 64] %}
+  struct Float{{size.id}}
+    def self.from_falkordb_result(result : Array)
+      FalkorDB.check_value!(result, :double).as(String).to_f{{size.id}}
+    end
+
+    def self.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
+      case type
+      when .string?
+        String.from_falkordb_value(type, value, cache).to_f{{size.id}}
+      when .integer?
+        Int64.from_falkordb_value(type, value, cache).to_f{{size.id}}
+      when .double?
+        value.as(String).to_f{{size.id}}
+      else
+        raise FalkorDB::Error.new("Could not parse #{value.inspect} (#{type}) as Float{{size.id}}")
+      end
+    end
+  end
 {% end %}
+
+struct Float
+  def to_falkordb_param(io : IO)
+    to_s io
+  end
+end
 
 {% for size in %w[8 16 32] %}
 def Int{{size.id}}.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
@@ -582,16 +636,28 @@ def Int{{size.id}}.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
 end
 {% end %}
 
-def Bool.from_falkordb_value(type : FalkorDB::ValueType, value, cache) : Bool
-  case value
-  when Int
-    value == 1
-  when String
-    value == "true"
-  when Array
-    value[1] == 1
-  else
-    raise ArgumentError.new("Could not parse #{type} from #{value.inspect}")
+struct Int
+  def to_falkordb_param(io : IO)
+    io << self
+  end
+end
+
+struct Bool
+  def self.from_falkordb_value(type : FalkorDB::ValueType, value, cache) : Bool
+    case value
+    when Int
+      value == 1
+    when String
+      value == "true"
+    when Array
+      value[1] == 1
+    else
+      raise ArgumentError.new("Could not parse #{type} from #{value.inspect}")
+    end
+  end
+
+  def to_falkordb_param(io : IO)
+    io << self
   end
 end
 
@@ -599,18 +665,88 @@ def Time.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
   Time.unix_ms Int64.from_falkordb_value(type, value, cache)
 end
 
+struct Time
+  def to_falkordb_param(io : IO)
+    to_unix_ms.to_falkordb_param io
+  end
+end
+
 def UUID.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
   new String.from_falkordb_value(type, value, cache)
+end
+
+struct UUID
+  def to_falkordb_param(io : IO)
+    to_s.to_falkordb_param io
+  end
+end
+
+def Nil.from_falkordb_result(result : Array)
+  FalkorDB.check_value! result, :null
+  nil
 end
 
 def Nil.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
 end
 
-def Array.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
-  value.as(Array).map do |item|
-    t, v = item.as Array
-    t = FalkorDB::ValueType.new(t.as(Int).to_i)
-    T.from_falkordb_value(t, v, cache).as(T)
+struct Nil
+  def to_falkordb_param(io : IO)
+    io << "null"
+  end
+end
+
+class Array
+  def self.from_falkordb_result(result : FalkorDB::Value)
+    raise ArgumentError.new("Cannot create a #{self} from #{result.inspect}")
+  end
+
+  def self.from_falkordb_result(result : Array)
+    FalkorDB.check_value!(result, :array).as(Array).map do |item|
+      T.from_falkordb_result(item.as(Array)).as(T)
+    end
+  end
+
+  def self.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
+    value.as(Array).map do |item|
+      t, v = item.as Array
+      t = FalkorDB::ValueType.new(t.as(Int).to_i)
+      T.from_falkordb_value(t, v, cache).as(T)
+    end
+  end
+
+  def to_falkordb_param(io : IO)
+    io << '['
+    each_with_index do |item, index|
+      io << ", " if index > 0
+      item.to_falkordb_param io
+    end
+    io << ']'
+  end
+end
+
+class Hash
+  def to_falkordb_param(io : IO)
+    io << '{'
+    each_with_index do |(key, value), index|
+      io << ", " if index > 0
+      key.to_s io
+      io << ':'
+      value.to_falkordb_param io
+    end
+    io << '}'
+  end
+end
+
+struct NamedTuple
+  def to_falkordb_param(io : IO)
+    io << '{'
+    each_with_index do |key, value, index|
+      io << ", " if index > 0
+      key.to_s io
+      io << ':'
+      value.to_falkordb_param io
+    end
+    io << '}'
   end
 end
 
@@ -623,7 +759,7 @@ def Tuple.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
           item = array[{{index}}]
           t, v = item.as Array
           t = FalkorDB::ValueType.new(t.as(Int).to_i)
-          T.from_falkordb_value(t, v, cache).as(T)
+          {{type}}.from_falkordb_value(t, v, cache).as({{type}})
         end,
       {% end %}
     }
@@ -645,7 +781,7 @@ def Enum.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
   when .integer?
     new Int64.from_falkordb_value(type, value, cache).to_i32
   when .string?
-    parse String.from_falkordb_value(type, value, cache)
+    parse String.from_falkordb_value(type, value, cache).tr(" ", "_")
   else
     raise ArgumentError.new("Could not parse #{self} from #{value.inspect} (#{type})")
   end
@@ -655,6 +791,19 @@ def FalkorDB::Value.from_falkordb_value(type : FalkorDB::ValueType, value, cache
   Union(*T).from_falkordb_value type, value, cache
 end
 
+# :nodoc:
+def Union.from_falkordb_result(result : Array)
+  type = FalkorDB::ValueType.new(result[0].as(Int).to_i)
+  {% for type in T %}
+    if {{type}}.matches_falkordb_type?(type)
+      return {{type}}.from_falkordb_result(result)
+    end
+  {% end %}
+
+  raise ArgumentError.new("Cannot create a #{self} from #{result.inspect} (#{result.class})")
+end
+
+# :nodoc:
 def Union.from_falkordb_value(type : FalkorDB::ValueType, value, cache) : self
   {% for type in T %}
     if {{type}}.matches_falkordb_type?(type)

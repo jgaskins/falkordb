@@ -15,4 +15,6 @@ struct FalkorDB::VectorF32
   def to_a
     values
   end
+
+  delegate to_falkordb_param, to: values
 end

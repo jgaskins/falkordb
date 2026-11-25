@@ -3,6 +3,15 @@ require "./spec_helper"
 redis = Redis::Client.new(URI.parse("redis://localhost:6380"))
 define_test redis
 
+private macro test_can_serialize(value, query = "RETURN $value")
+  %value = {{value}}
+  test "can serialize #{%value.class}" do
+    graph.write_query({{query}}, {value: %value}, return: %value.class)
+      .first
+      .should eq %value
+  end
+end
+
 describe FalkorDB do
   test "runs basic queries" do
     # We need to write to the graph to ensure the graph's Redis key exists
@@ -114,6 +123,60 @@ describe FalkorDB do
     ]
   end
 
+  describe "param serialization" do
+    test_can_serialize 1i8
+    test_can_serialize 1i16
+    test_can_serialize 1i32
+    test_can_serialize 1i64
+    test_can_serialize 1.0f32
+    test_can_serialize 1.0f64
+    test_can_serialize nil
+    test_can_serialize true
+    test_can_serialize false
+    test_can_serialize "test"
+    # We serialize down to the millisecond, so we have to truncate the timestamp
+    # here to the same precision for comparison
+    test_can_serialize Time.unix_ms(Time.utc.to_unix_ms)
+    # `return: FalkorDB::List` means "the whole row, as a list of columns", so
+    # the macro's single-column comparison doesn't apply.
+    test "can serialize FalkorDB::List" do
+      value = FalkorDB::List{1i64, "two", true}
+      graph.write_query("RETURN $value", {value: value}, return: FalkorDB::List)
+        .first
+        .should eq [value]
+    end
+    test_can_serialize [1,2,3]
+    test_can_serialize FalkorDB::Map{"a" => 1i64, "b" => 2i64}
+    test_can_serialize FalkorDB::Point.new(12, 34), "RETURN point($value)"
+    test_can_serialize FalkorDB::LocalTime.new(12, 34, 56),
+      "RETURN localtime($value)"
+    test_can_serialize FalkorDB::LocalDate.new(2026, 2, 15),
+      "RETURN date($value)"
+    test_can_serialize FalkorDB::LocalDateTime.new(Time.unix(Time.utc.to_unix)),
+      "RETURN localdatetime($value)"
+    test_can_serialize FalkorDB::Duration.new(12.hours + 34.minutes + 56.seconds),
+      "RETURN duration($value)"
+    test "can serialize negative durations" do
+      value = FalkorDB::Duration.new(-(1.hour + 2.minutes + 3.seconds))
+      graph.write_query("RETURN duration($value)", {value: value}, return: FalkorDB::Duration)
+        .first
+        .should eq value
+    end
+    test "truncates fractional seconds in durations, because FalkorDB does" do
+      graph.write_query("RETURN duration($value)", {value: FalkorDB::Duration.new(1.5.seconds)}, return: FalkorDB::Duration)
+        .first
+        .should eq FalkorDB::Duration.new(1.second)
+    end
+    test "can serialize strings containing escapes and characters special to Crystal" do
+      value = %(quote:" backslash:\\ \n\t\r\b\f esc:\e nul:\u0000 del:\u007F interp:\#{x} 'single' é ✓ 😀)
+      graph.write_query("RETURN $value", {value: value}, return: String)
+        .first
+        .should eq value
+    end
+    test_can_serialize FalkorDB::VectorF32.new([1f32, 2f32, 3f32]),
+      "RETURN vecf32($value)"
+  end
+
   test "sets the return type" do
     result = graph.write_query <<-CYPHER, return: UUID
       CREATE (user:User {
@@ -145,6 +208,7 @@ describe FalkorDB do
       return u.name
     CYPHER
 
+    read.size.should eq 1
     read.first.should eq "Jamie"
   end
 
@@ -157,11 +221,14 @@ describe FalkorDB do
 
   test "writes and reads relationships" do
     now = Time.utc.to_unix_ms
-    written = graph.write_query("create (:User)-[membership:MEMBER_OF{since: $now}]->(:Team) return membership", {now: now}, return: FalkorDB::Relationship)
+    written = graph.write_query "create (:User)-[membership:MEMBER_OF{since: $now}]->(:Team) return membership",
+      {now: now},
+      return: FalkorDB::Relationship
     written.first.type.should eq "MEMBER_OF"
     written.first.properties["since"].should eq now
 
-    read = graph.read_query("match (:User)-[membership:MEMBER_OF]->(:Team) return membership", return: FalkorDB::Relationship)
+    read = graph.read_query "match (:User)-[membership:MEMBER_OF]->(:Team) return membership",
+      return: FalkorDB::Relationship
     read.first.should eq written.first
   end
 
@@ -210,14 +277,17 @@ describe FalkorDB do
       index.properties.should eq %w[id]
     end
 
+    # FalkorDB uses RediSearch for indexes, which creates them async, so we need
+    # to handle the case where an index is still being built when we ask for it.
+    test "lists indices that are under construction" do
+      graph.write_query "UNWIND range(1, 50000) AS id CREATE (:User{id: id})"
+      graph.indices.create label: "User", property: "id"
+
+      graph.indices.list.first.status.under_construction?.should eq true
+    end
+
     test "creates fulltext indices" do
-      graph.indices.create_fulltext_node "User",
-        "id",
-        {
-          field:  "name",
-          nostem: true,
-          weight: 2,
-        }
+      graph.indices.create_fulltext_node "User", "id", "name"
 
       index = graph.indices.list.first
 
@@ -266,6 +336,17 @@ describe FalkorDB do
       constraint.properties.should eq %w[id]
     end
 
+    test "lists constraints that are under construction" do
+      # Constraints are created and checked async, so we need to create enough
+      # nodes for the constraint to still be under construction when we check
+      # but nott enough for me to get impatient when running the specs
+      graph.write_query "UNWIND range(1, 50000) AS id CREATE (:User{id: id})"
+      graph.indices.create "User", "id"
+      graph.constraints.create :unique, node_label: "User", properties: %w[id]
+
+      graph.constraints.list.first.status.under_construction?.should eq true
+    end
+
     test "creates and lists mandatory constraints" do
       graph.constraints.create :mandatory, node_label: "User", properties: %w[id]
       constraint = graph.constraints.list.first
@@ -297,9 +378,10 @@ describe FalkorDB do
       RETURN user
     CYPHER
 
+    # FalkorDB keeps a Filter above the index scan when the value is a param
     query_plan.should eq [
-      "Results",
-      "    Project",
+      "Project",
+      "    Filter",
       "        Node By Index Scan | (user:User)",
     ]
   end
@@ -316,8 +398,8 @@ describe FalkorDB do
       RETURN user
     CYPHER
 
-    query_plan[0].as(String).should start_with "Results | Records produced: 1, Execution time:"
-    query_plan[1].as(String).should start_with "    Project | Records produced: 1, Execution time:"
+    query_plan[0].as(String).should start_with "Project | Records produced: 1, Execution time:"
+    query_plan[1].as(String).should start_with "    Filter | Records produced: 1, Execution time:"
     query_plan[2].as(String).should start_with "        Node By Index Scan | (user:User) | Records produced: 1, Execution time:"
   end
 
@@ -354,18 +436,63 @@ describe FalkorDB do
       results.size.should eq 1
       results.first.name.should eq "FalkorDB Users"
     ensure
-      redis.unlink new_key
+      new_graph.delete! if new_graph
     end
   end
 
   test "gets the log of the slowest queries" do
-    graph.write_query "CREATE (:Team{id: randomUUID(), name: 'FalkorDB Users'})"
+    # Gotta run a query slow enough to get it into the slow query log (10ms by
+    # default) but not so long that I get annoyed when running the specs
+    query = "UNWIND range(1, $count) AS index CREATE (:User{id: randomUUID(), name: $prefix + index})"
+    graph.write_query query, count: 50_000, prefix: "User "
 
     slowlog = graph.slowlog
 
     slowlog.size.should eq 1
     slowlog.first.command.should eq "GRAPH.QUERY"
-    slowlog.first.query.should eq "CREATE (:Team{id: randomUUID(), name: 'FalkorDB Users'})"
+    slowlog.first.query.should eq query
+    slowlog.first.params.should eq %(count=50000 prefix="User ")
+    slowlog.first.duration.should be >= 10.milliseconds
+    slowlog.first.timestamp.should be_within 1.minute, of: Time.utc
+  end
+
+  describe "user-defined functions (UDFs)" do
+    test "creates UDF libraries" do
+      graph.write_query "create (n)" # avoid error when deleting after the test
+      graph.udf.load "test_utils", <<-UDF, replace: true
+        function identity(x) { return x; }
+        falkor.register("identity", identity);
+      UDF
+
+      graph
+        .write_query("RETURN test_utils.identity(42)", return: Int64)
+        .first
+        .should eq 42
+    ensure
+      graph.udf.delete "test_utils" rescue nil
+    end
+
+    test "lists UDF libraries" do
+      graph.write_query "create (n)" # avoid error when deleting after the test
+      graph.udf.load "test_utils", <<-UDF, replace: true
+        function identity(x) { return x; }
+        falkor.register("identity", identity);
+      UDF
+
+      # For some reason the `contain` matcher doesn't work here.
+      graph.udf.list.as(Array).includes?([
+        "library_name", "test_utils",
+        "functions", ["identity"],
+      ]).should eq true
+      graph.udf.list("test_utils").should eq [
+        [
+          "library_name", "test_utils",
+          "functions", ["identity"],
+        ],
+      ]
+    ensure
+      graph.udf.delete "test_utils" rescue nil
+    end
   end
 end
 

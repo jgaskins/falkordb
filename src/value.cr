@@ -1,6 +1,7 @@
 require "./point"
 require "./node"
 require "./relationship"
+require "./temporal"
 
 module FalkorDB
   alias Value = String |

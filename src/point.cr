@@ -8,7 +8,7 @@ module FalkorDB
     getter longitude : Float64
 
     def self.matches_falkordb_type?(type : ::FalkorDB::ValueType) : Bool
-      type.array?
+      type.point?
     end
 
     def self.from_falkordb_value(type : FalkorDB::ValueType, value, cache)
@@ -19,6 +19,10 @@ module FalkorDB
     end
 
     def initialize(@latitude, @longitude)
+    end
+
+    def to_falkordb_param(io : IO)
+      io << "{latitude: " << latitude << ",longitude: " << longitude << "}"
     end
   end
 end
