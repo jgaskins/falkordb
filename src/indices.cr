@@ -45,6 +45,12 @@ module FalkorDB
         str << ')'
       end
       graph.write_query cypher
+    rescue ex : Redis::Error
+      if (msg = ex.message) && (match = msg.match(/Attribute '(.*)' is already indexed/))
+        raise IndexAlreadyExists.new("Index on #{label.inspect} already indexes #{match[1].inspect}")
+      else
+        raise ex
+      end
     end
 
     # Create a full-text index with per-field options (`weight`, `nostem`,
